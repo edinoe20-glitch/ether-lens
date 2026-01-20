@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ether Lens Station</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        body { background-color: #050505; color: #e5e5e5; font-family: 'Inter', sans-serif; }
+        .font-cyber { font-family: 'Orbitron', sans-serif; }
+        .glass { background: rgba(20, 20, 20, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .neon-border:focus-within { box-shadow: 0 0 15px rgba(168, 85, 247, 0.3); border-color: rgba(168, 85, 247, 0.6); }
+    </style>
+</head>
+<body class="pb-24">
+    <div class="fixed top-0 w-full glass z-50 px-6 py-4 flex justify-between items-center">
+        <h1 class="font-cyber text-xl tracking-widest bg-gradient-to-r from-purple-500 to-blue-500 bg-clip-text text-transparent">ETHER LENS</h1>
+        <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e]"></div>
+    </div>
+
+    <div class="max-w-md mx-auto mt-24 px-4">
+        <div class="glass p-1 rounded-xl neon-border transition-all duration-300">
+            <div class="relative flex items-center">
+                <input type="text" id="linkInput" placeholder="Paste TikTok / IG Link..." class="w-full bg-transparent text-sm p-4 outline-none placeholder-gray-600 text-white">
+                <button onclick="sendLink()" class="absolute right-2 bg-purple-600 hover:bg-purple-700 text-white p-2 rounded-lg transition-all">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 1.414L10.586 9H7a1 1 0 100 2h3.586l-1.293 1.293a1 1 0 101.414 1.414l3-3a1 1 0 000-1.414z" clip-rule="evenodd" /></svg>
+                </button>
+            </div>
+        </div>
+        <div id="statusMsg" class="text-center text-xs text-gray-500 mt-2 h-4"></div>
+
+        <h2 class="font-cyber text-xs text-gray-500 mt-10 mb-4 tracking-widest">ARCHIVE FEED</h2>
+        <div id="gallery" class="grid grid-cols-2 gap-4">
+            <div class="col-span-2 text-center py-10 animate-pulse text-gray-800">waiting for signal...</div>
+        </div>
+    </div>
+
+    <div id="playerModal" class="fixed inset-0 bg-black z-[60] hidden flex flex-col justify-center">
+        <button onclick="closePlayer()" class="absolute top-6 right-6 text-white/50 hover:text-white p-2">✖</button>
+        <video id="mainVideo" class="w-full max-h-screen" controls playsinline></video>
+    </div>
+
+    <script>
+        async function sendLink() {
+            const input = document.getElementById('linkInput');
+            const status = document.getElementById('statusMsg');
+            const link = input.value;
+            if (!link) return;
+            status.innerText = "Transmitting to HQ...";
+            status.className = "text-center text-xs text-purple-400 mt-2 h-4 animate-pulse";
+            try {
+                await fetch('/api/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ link: link }) });
+                input.value = "";
+                status.innerText = "Signal Received.";
+                setTimeout(() => status.innerText = "", 3000);
+                loadGallery();
+            } catch (e) { status.innerText = "Connection Failed."; status.className = "text-center text-xs text-red-500 mt-2 h-4"; }
+        }
+
+        async function loadGallery() {
+            try {
+                const res = await fetch('/api/videos');
+                const videos = await res.json();
+                const container = document.getElementById('gallery');
+                if (videos.length === 0) return;
+                container.innerHTML = videos.map(vid => `
+                    <div onclick="playVideo('${vid.url}')" class="relative group cursor-pointer aspect-[9/16] bg-gray-900 rounded-xl overflow-hidden border border-gray-800">
+                        <img src="${vid.thumb}" class="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition duration-500">
+                        <div class="absolute bottom-0 left-0 w-full p-3 bg-gradient-to-t from-black to-transparent"><p class="text-[10px] text-gray-400 font-cyber">${vid.date}</p></div>
+                    </div>`).join('');
+            } catch (e) { console.log("Offline mode"); }
+        }
+        function playVideo(url) { document.getElementById('mainVideo').src = url; document.getElementById('playerModal').classList.remove('hidden'); document.getElementById('mainVideo').play(); }
+        function closePlayer() { document.getElementById('mainVideo').pause(); document.getElementById('playerModal').classList.add('hidden'); }
+        setInterval(loadGallery, 5000); loadGallery();
+    </script>
+</body>
+</html>
