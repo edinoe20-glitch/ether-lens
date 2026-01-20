@@ -1,0 +1,22 @@
+# Python junk
+__pycache__/
+*.pyc
+
+# Environment Variables (RAHASIA!)
+.env
+
+# Tools AI (Gede banget, suruh user download sendiri)
+bin/
+!bin/.keep
+
+# Database & Temp Files
+data/*.json
+data/temp/
+*.mp4
+*.jpg
+*.m3u8
+*.ts
+
+# System
+.DS_Store
+Thumbs.db
