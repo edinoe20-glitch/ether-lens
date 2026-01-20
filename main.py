@@ -1,161 +1,103 @@
 import os
-import time
-import json
-import boto3
 import subprocess
-import shutil
-from fastapi import FastAPI, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+import uuid
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from botocore.client import Config
-from dotenv import load_dotenv
-
-# --- 1. CONFIG & SETUP ---
-
-# Load settingan rahasia dari file .env
-load_dotenv()
-
-# Ambil variabel environment
-R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
-R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
-R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL")
-RIFE_PATH = os.getenv("RIFE_PATH", "bin/rife-ncnn-vulkan/rife-ncnn-vulkan") # Default path
-
-# Setup folder data biar rapi
-DATA_DIR = "data"
-TEMP_DIR = os.path.join(DATA_DIR, "temp")
-DB_FILE = os.path.join(DATA_DIR, "db.json")
-
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-# Setup Client Cloudflare R2
-s3 = boto3.client('s3',
-    endpoint_url=f'https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
-    aws_access_key_id=R2_ACCESS_KEY,
-    aws_secret_access_key=R2_SECRET_KEY,
-    config=Config(signature_version='s3v4')
-)
+import yt_dlp
 
 app = FastAPI()
 
-# --- 2. FUNGSI DATABASE ---
+# --- 1. SETUP AGAR HP BISA AKSES ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def load_db():
-    if not os.path.exists(DB_FILE): return []
-    try:
-        with open(DB_FILE, 'r') as f: return json.load(f)
-    except: return []
+# --- 2. BIKIN FOLDER PENYIMPANAN ---
+# Video hasil render bakal masuk ke folder 'output' di laptop lu
+OUTPUT_DIR = "output"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def save_db(data):
-    with open(DB_FILE, 'w') as f: json.dump(data, f, indent=4)
+# Mount folder ini biar bisa dibuka dari internet (lewat tunnel)
+app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
-def add_video_to_db(video_data):
-    db = load_db()
-    db.insert(0, video_data) # Masukin paling atas (terbaru)
-    save_db(db)
+# --- 3. LOKASI MESIN AI (RIFE) ---
+# Sesuai path yang kita fix tadi
+RIFE_PATH = "bin/rife-ncnn-vulkan/rife-ncnn-vulkan"
 
-# --- 3. WORKER (GTX 1650 TASK) ---
+@app.get("/")
+def home():
+    return {"status": "Ether Lens Local Mode", "message": "Siap Tempur! Gak butuh R2/CC."}
 
-def process_video_task(link):
-    timestamp = int(time.time())
-    job_id = f"job_{timestamp}"
-    print(f"⚡ [Ether Lens] Processing: {link}")
+@app.post("/render")
+def render_video(data: dict):
+    video_url = data.get("url")
+    if not video_url:
+        raise HTTPException(status_code=400, detail="Mana link videonya bang?")
+
+    # Bikin nama file acak biar gak bentrok
+    video_id = str(uuid.uuid4())[:8]
+    raw_path = f"{OUTPUT_DIR}/{video_id}_raw.mp4"
+    final_filename = f"{video_id}_60fps.mp4"
+    final_path = f"{OUTPUT_DIR}/{final_filename}"
+
+    print(f"\n⬇️  Mulai Download: {video_url}")
+
+    # --- TAHAP 1: DOWNLOAD VIDEO ---
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': raw_path,
+        'quiet': True,
+        'no_warnings': True
+    }
     
-    # Path File Sementara
-    raw_file = os.path.join(TEMP_DIR, f"{job_id}_raw.mp4")
-    final_file = os.path.join(TEMP_DIR, f"ether_{timestamp}.mp4")
-    thumb_file = os.path.join(TEMP_DIR, f"thumb_{timestamp}.jpg")
-
     try:
-        # STEP 1: Download (Best Quality)
-        print(f"⬇️ Downloading...")
-        # -S res:1080 biar gak kegedean, atau apus -S kalo mau source asli
-        subprocess.run(f'yt-dlp -o "{raw_file}" "{link}"', shell=True, check=True)
-        
-        # STEP 2: AI Render 60FPS (RIFE)
-        print(f"🏎️ Interpolating 60FPS (GTX 1650)...")
-        # Command RIFE. Pastikan path binary di .env bener!
-        cmd_rife = f'"{RIFE_PATH}" -i "{raw_file}" -o "{final_file}" -m rife-v4.6'
-        result = subprocess.run(cmd_rife, shell=True)
-        
-        if result.returncode != 0:
-            raise Exception("Gagal Render AI")
-
-        # STEP 3: Generate Thumbnail
-        print(f"🖼️ Extracting Thumbnail...")
-        subprocess.run(f'ffmpeg -y -i "{final_file}" -ss 00:00:02.000 -vframes 1 "{thumb_file}"', shell=True)
-
-        # STEP 4: Upload ke Cloudflare R2
-        print(f"☁️ Uploading to Cloud...")
-        
-        # Upload Video
-        cloud_vid_name = f"ether_{timestamp}.mp4"
-        s3.upload_file(final_file, R2_BUCKET_NAME, cloud_vid_name, ExtraArgs={'ContentType': 'video/mp4'})
-        
-        # Upload Thumb
-        cloud_thumb_name = f"thumb_{timestamp}.jpg"
-        s3.upload_file(thumb_file, R2_BUCKET_NAME, cloud_thumb_name, ExtraArgs={'ContentType': 'image/jpeg'})
-        
-        # STEP 5: Update Database
-        new_entry = {
-            "id": timestamp,
-            "url": f"{R2_PUBLIC_URL}/{cloud_vid_name}",
-            "thumb": f"{R2_PUBLIC_URL}/{cloud_thumb_name}",
-            "date": time.strftime("%Y-%m-%d %H:%M"),
-            "original_link": link
-        }
-        add_video_to_db(new_entry)
-        
-        print(f"✅ Success! Video ready at: {new_entry['url']}")
-
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-    
-    finally:
-        # Cleanup: Hapus file sampah lokal biar hardisk gak penuh
-        print("🧹 Cleaning up...")
-        for f in [raw_file, final_file, thumb_file]:
-            if os.path.exists(f): os.remove(f)
+        print(f"❌ Error Download: {e}")
+        return {"error": "Gagal download video aslinya"}
 
-# --- 4. API ENDPOINTS ---
+    print(f"🏎️  Sedang Menggiling AI (60FPS)... Sabar ya, laptop lagi kerja keras.")
 
-# Endpoint buat Web Frontend minta data video
-@app.get("/api/videos")
-async def get_videos():
-    return load_db()
+    # --- TAHAP 2: RENDER RIFE ---
+    # Kita cek dulu apakah file raw berhasil didownload
+    if not os.path.exists(raw_path):
+         return {"error": "File download gak ketemu!"}
 
-# Endpoint buat submit link dari Web
-@app.post("/api/submit")
-async def submit_link(request: Request, background_tasks: BackgroundTasks):
-    data = await request.json()
-    link = data.get("link")
-    
-    if not link: 
-        return JSONResponse(status_code=400, content={"msg": "Link kosong bro"})
-    
-    # Jalanin proses di background biar web gak loading lama
-    background_tasks.add_task(process_video_task, link)
-    
-    return {"status": "ok", "msg": "Link diterima, sedang diproses..."}
+    try:
+        # Perintah menjalankan RIFE
+        subprocess.run([
+            RIFE_PATH,
+            "-i", raw_path,
+            "-o", final_path,
+            "-m", "rife-v4.6" # Model paling stabil
+        ], check=True)
+    except Exception as e:
+        print("⚠️ Model v4.6 error, mencoba model default...")
+        try:
+            subprocess.run([RIFE_PATH, "-i", raw_path, "-o", final_path], check=True)
+        except Exception as e:
+            return {"error": f"Gagal Render AI: {str(e)}"}
 
-# Endpoint Utama (Serve HTML)
-@app.get("/", response_class=HTMLResponse)
-async def home():
-    # Pastikan file index.html ada di folder templates
-    template_path = os.path.join("templates", "index.html")
-    if os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            return f.read()
-    else:
-        return "<h1>Error: templates/index.html not found!</h1>"
+    # --- TAHAP 3: BERSIH-BERSIH ---
+    # Hapus file mentah biar harddisk gak penuh
+    if os.path.exists(raw_path):
+        os.remove(raw_path)
 
-# --- 5. RUNNER ---
+    print(f"✅ SUKSES! Video jadi: {final_path}")
+
+    # --- TAHAP 4: KIRIM LINK KE HP ---
+    # Browser HP bakal otomatis nambahin domain tunnel di depannya
+    return {
+        "status": "success", 
+        "url": f"/output/{final_filename}"
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    print("💎 Ether Lens Station Starting...")
-    print(f"📂 RIFE Path: {RIFE_PATH}")
-    # Jalan di localhost port 8000
+    # Host 0.0.0.0 biar bisa diakses dari luar (wajib buat tunnel)
     uvicorn.run(app, host="0.0.0.0", port=8000)
